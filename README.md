@@ -1,13 +1,13 @@
 # Setup
-1 - You should pip install all the requirements 
+1 - You need to install python 3.10, 3.11, 3.12, 3.13 or 3.14. You can do that here: https://www.python.org/downloads/
 
-2 - To setup the server you need to download the weights from the huggingface repo. Go here: https://huggingface.co/kyutai/pocket-tts/tree/main
+2 - Now you need to go to https://huggingface.co/kyutai/pocket-tts/tree/main and download the safetensors file (`tts_b6369a24.safetensors` at time of writing this). You will need to have a huggingface account and accept kyutai's terms of service. Save the file in the weights directory and name it `tts_skyrimnet.safetensors`. Its important to name it exactly as written here, the script requires it to have that name.
 
-and download the .safetensors file and place it in the .venv/Lib/site-packages/pocket_tts/config/ directory
-Next copy the skyrimnet.yaml from the weights directory and also paste it in the above config directory
-
-You will need to have a huggingface account and need to accept the terms and conditions of the repo before you can download the file.
+3 - You can now run the setup.bat
 
 # Running the server
-run the skyrimnet_api.py file to start the server. 
+run runserver.bat to start the server
 
+
+# Server features
+Pocket-tts runs only on the CPU, so no need to worry about GPU versions or VRAM budgets. It also has 0 shot voice cloning despite taking very little RAM. 
