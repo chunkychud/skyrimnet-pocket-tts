@@ -1,102 +1,110 @@
-
 #!/usr/bin/env python3
 """
 SkyrimNet Simplified FastAPI TTS Service
 Simplified FastAPI service modeling APIs from xtts_api_server but using methodology from skyrimnet-xtts.py
 """
 
-# Standard library imports
-from datetime import datetime
+from __future__ import annotations
+
+import asyncio
+import ctypes
 import os
+import re
+import shutil
 import sys
 import tempfile
+import time
+from contextlib import asynccontextmanager
+from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from contextlib import asynccontextmanager
-import asyncio
 
-# Third-party imports
-import scipy
+import numpy as np
+import scipy.io.wavfile
 import uvicorn
-import time
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, BackgroundTasks, Request
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 from loguru import logger
+from pydantic import BaseModel
 
-# TTS Model
 from pocket_tts import TTSModel
-
-# Windows specific optimizations
-import ctypes
-from ctypes import wintypes
-import psutil
 
 # Local imports - Handle both direct execution and module execution
 try:
-    # Try relative imports first (for module execution: python -m skyrimnet-xtts)
-    from .shared_config import SUPPORTED_LANGUAGE_CODES, validate_language, get_tts_params
+    from .shared_config import SUPPORTED_LANGUAGE_CODES, validate_language
     from .shared_args import parse_api_args
     from .shared_app_utils import setup_application_logging, initialize_application_environment
     from .shared_app_cleanup import output_cleanup_worker, cleanup_output_directory
 except ImportError:
-    # Fall back to absolute imports (for direct execution: python skyrimnet_api.py)
-    from shared_config import SUPPORTED_LANGUAGE_CODES, validate_language, get_tts_params
+    from shared_config import SUPPORTED_LANGUAGE_CODES, validate_language
     from shared_args import parse_api_args
     from shared_app_utils import setup_application_logging, initialize_application_environment
     from shared_app_cleanup import output_cleanup_worker, cleanup_output_directory
+
+
 # =============================================================================
-# GLOBAL CONFIGURATION AND CONSTANTS
+# CONFIG / PATHS
 # =============================================================================
 
-# Global Paths
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SPEAKER_DIRECTORY = ROOT_DIR / "speakers"
 OUTPUT_DIRECTORY = ROOT_DIR / "output"
 WEIGHTS_DIRECTORY = ROOT_DIR / "weights"
 
-# Ensure the paths exist
 SPEAKER_DIRECTORY.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 WEIGHTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-# Global model state
-CURRENT_MODEL = None
-IGNORE_PING = None
-CACHED_TEMP_DIR = None
-AVAILABLE_SPEAKERS = {}
-SILENCE_AUDIO_PATH =  SPEAKER_DIRECTORY / "silence_100ms.wav"
-OUTPUT_CLEANUP_MAX_AGE_MINUTES = 5
-OUTPUT_CLEANUP_INTERVAL_SECONDS = 5 * 60  # To check the output dir every 5 minutes for cleanup
+SILENCE_AUDIO_PATH = SPEAKER_DIRECTORY / "silence_100ms.wav"
 
-# =============================================================================
-# COMMAND LINE ARGUMENT PARSING
-# =============================================================================
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+        return val if val > 0 else default
+    except ValueError:
+        return default
+
+
+# For testing you can set:
+#   set OUTPUT_CLEANUP_MAX_AGE_SECONDS=30
+#   set OUTPUT_CLEANUP_INTERVAL_SECONDS=10
+OUTPUT_CLEANUP_MAX_AGE_SECONDS = _env_int("OUTPUT_CLEANUP_MAX_AGE_SECONDS", 10 * 60)   # default 10 min
+OUTPUT_CLEANUP_INTERVAL_SECONDS = _env_int("OUTPUT_CLEANUP_INTERVAL_SECONDS", 5 * 60)  # default 5 min
+OUTPUT_CLEANUP_GLOB = os.environ.get("OUTPUT_CLEANUP_GLOB", "*").strip() or "*"
+
+# Global model/state
+CURRENT_MODEL: Optional[TTSModel] = None
+IGNORE_PING: Optional[bool | str] = None
+CACHED_TEMP_DIR: Optional[Path] = None
+
+SPEAKERS_AVAILABLE: dict[str, Path] = {}
+
+# Parse CLI args
 args = parse_api_args("SkyrimNet Simplified TTS API")
 
-# =============================================================================
-# LOGGING SETUP
-# =============================================================================
-
-# Global flag to track if logging has been initialized
+# Logging init guard
 _LOGGING_INITIALIZED = False
 
-def initialize_api_logging():
-    """Initialize logging for the API module"""
+
+def initialize_api_logging() -> None:
     global _LOGGING_INITIALIZED
     if not _LOGGING_INITIALIZED:
-        # Setup standardized logging (only when not already configured)
         setup_application_logging()
         _LOGGING_INITIALIZED = True
 
-# Only setup logging when running as standalone script
+
 if __name__ == "__main__":
     initialize_api_logging()
 
+
 # =============================================================================
-# PYDANTIC REQUEST/RESPONSE MODELS
+# MODELS
 # =============================================================================
 
 class SynthesisRequest(BaseModel):
@@ -105,59 +113,70 @@ class SynthesisRequest(BaseModel):
     language: Optional[str] = "en"
     accent: Optional[str] = None
     save_path: Optional[str] = None
-    # TTS inference parameters
+    # (kept for compatibility; currently not used by pocket_tts)
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     speed: Optional[float] = None
     repetition_penalty: Optional[float] = None
-    # Override flag: if True, payload values override config file
     override: Optional[bool] = False
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# HELPERS
 # =============================================================================
 
-def get_cached_temp_dir():
-    """Get or create the cached temporary directory"""
+def get_cached_temp_dir() -> Path:
     global CACHED_TEMP_DIR
-    
-    if CACHED_TEMP_DIR is None:
+    if CACHED_TEMP_DIR is None or not CACHED_TEMP_DIR.exists():
         CACHED_TEMP_DIR = Path(tempfile.mkdtemp(prefix="skyrimnet_tts_"))
-        logger.info(f"Created cached temp directory: {CACHED_TEMP_DIR}")
-    elif not CACHED_TEMP_DIR.exists():
-        # Recreate if it was somehow deleted
-        CACHED_TEMP_DIR = Path(tempfile.mkdtemp(prefix="skyrimnet_tts_"))
-        logger.info(f"Recreated cached temp directory: {CACHED_TEMP_DIR}")
-    
+        logger.info("Using cached temp directory: {}", str(CACHED_TEMP_DIR))
     return CACHED_TEMP_DIR
 
 
-def update_available_speakers():
+def update_available_speakers() -> None:
     global SPEAKERS_AVAILABLE
     SPEAKERS_AVAILABLE = {}
-
-    for p in SPEAKER_DIRECTORY.glob("**/*.wav"):  # recursive
+    for p in SPEAKER_DIRECTORY.glob("**/*.wav"):
         if p.is_file():
-            speaker_name = p.name.replace(".wav", "") # Speaker name is the filename minus the extension
-            SPEAKERS_AVAILABLE[speaker_name] = p
-    
-    logger.info(f"Speaker currently available: {[speaker_name for speaker_name in SPEAKERS_AVAILABLE.keys()]}")
+            SPEAKERS_AVAILABLE[p.stem] = p
+    logger.info("Speaker currently available: {}", list(SPEAKERS_AVAILABLE.keys()))
+
+
+_SPEAKER_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+
+def _sanitize_speaker_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="speaker_name is required")
+    if not _SPEAKER_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="speaker_name must be 1-64 chars of letters/numbers/_/- only",
+        )
+    return name
+
+
+def _ensure_silence_wav(sample_rate: int) -> None:
+    if SILENCE_AUDIO_PATH.exists():
+        return
+    SILENCE_AUDIO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    samples = int(sample_rate * 0.1)  # 100ms
+    silence = np.zeros(samples, dtype=np.float32)
+    scipy.io.wavfile.write(str(SILENCE_AUDIO_PATH), sample_rate, silence)
+    logger.info("Created silence WAV: {}", str(SILENCE_AUDIO_PATH))
 
 
 def _detect_p_core_logical_cpus_windows() -> list[int]:
     """
     Returns logical CPU indices that appear to be P-cores by picking CPUs with the highest
-    EfficiencyClass from Windows CPU Set info.
-
-    If detection fails, returns [].
+    EfficiencyClass from Windows CPU Set info. If detection fails, returns [].
     """
     if os.name != "nt":
         return []
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
     GetSystemCpuSetInformation = kernel32.GetSystemCpuSetInformation
     GetSystemCpuSetInformation.argtypes = [
         ctypes.c_void_p,
@@ -187,7 +206,6 @@ def _detect_p_core_logical_cpus_windows() -> list[int]:
 
     needed = wintypes.ULONG(0)
     ok = GetSystemCpuSetInformation(None, 0, ctypes.byref(needed), None, 0)
-    # ERROR_INSUFFICIENT_BUFFER = 122 is expected on the sizing call
     if ok or ctypes.get_last_error() != 122 or needed.value == 0:
         return []
 
@@ -206,149 +224,128 @@ def _detect_p_core_logical_cpus_windows() -> list[int]:
         if hdr.Size == 0:
             break
 
-        # Type 0 is CpuSet entries on current Windows builds
         if hdr.Type == 0 and hdr.Size >= header_size + ctypes.sizeof(_CPUSET_INFO_CPUSET):
             cs = _CPUSET_INFO_CPUSET.from_address(base + offset + header_size)
-            cpu_sets.append(
-                {
-                    "lpi": int(cs.LogicalProcessorIndex),
-                    "eff": int(cs.EfficiencyClass),
-                }
-            )
+            cpu_sets.append({"lpi": int(cs.LogicalProcessorIndex), "eff": int(cs.EfficiencyClass)})
 
         offset += hdr.Size
 
     if not cpu_sets:
         return []
 
-    max_eff = max(x["eff"] for x in cpu_sets)
-    pcores = sorted({x["lpi"] for x in cpu_sets if x["eff"] == max_eff})
+    max_eff = max(d["eff"] for d in cpu_sets)
+    pcores = sorted({d["lpi"] for d in cpu_sets if d["eff"] == max_eff})
     return pcores
 
-def pin_process_to_p_cores(logger) -> None:
+
+def pin_process_to_pcores() -> None:
     """
-    Pins the current process to P-cores (or best-guess) to avoid scheduling on E-cores.
-    - Uses env var PCORE_CPUS="0,1,2,3" if provided (highest priority).
-    - Else uses Windows CPU Set EfficiencyClass detection.
+    Optional: pin the *process* to detected P-cores on Windows hybrid CPUs.
+    Safe no-op on non-Windows.
     """
     if os.name != "nt":
         return
 
-    # Manual override is often the most reliable.
-    override = os.environ.get("PCORE_CPUS", "").strip()
-    if override:
-        try:
-            pcore_cpus = [int(x.strip()) for x in override.split(",") if x.strip()]
-        except ValueError:
-            pcore_cpus = []
-        if pcore_cpus:
-            psutil.Process(os.getpid()).cpu_affinity(pcore_cpus)
-            logger.info(f"Pinned process to PCORE_CPUS override: {pcore_cpus}")
+    try:
+        pcores = _detect_p_core_logical_cpus_windows()
+        if not pcores:
+            logger.info("P-core detection returned empty; skipping pinning")
             return
 
-    pcore_cpus = _detect_p_core_logical_cpus_windows()
-    if pcore_cpus:
-        psutil.Process(os.getpid()).cpu_affinity(pcore_cpus)
-        logger.info(f"Pinned process to detected P-cores: {pcore_cpus}")
-    else:
-        logger.warning("Could not detect P-cores; leaving default CPU scheduling in place.")
+        try:
+            import psutil  # optional dependency in your project
+        except Exception:
+            logger.info("psutil not available; skipping pinning")
+            return
+
+        proc = psutil.Process()
+        proc.cpu_affinity(pcores)
+        logger.info("Pinned process to detected P-cores: {}", pcores)
+    except Exception as e:
+        logger.warning("Failed to pin process to P-cores: {}", e)
+
+
+def _safe_output_filename(speaker_name: str) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_speaker = speaker_name.replace("\\", "_").replace("/", "_")
+    return f"{ts}_{safe_speaker}.wav"
+
 
 # =============================================================================
-# Cache management
+# FASTAPI APP + LIFESPAN
 # =============================================================================
-    
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Starting Cache manager")
+    global CURRENT_MODEL
 
+    logger.info("Lifespan STARTUP enter")
+    OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    SPEAKER_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+    # Optional: pin to P-cores (Windows only)
+    pin_process_to_pcores()
+
+    # Refresh speakers
+    update_available_speakers()
+
+    # Load model (off the event loop)
+    try:
+        t0 = time.perf_counter()
+        CURRENT_MODEL = await asyncio.to_thread(TTSModel.load_model)
+        logger.info("Model loaded successfully in {:.2f}s", time.perf_counter() - t0)
+        _ensure_silence_wav(CURRENT_MODEL.sample_rate)
+    except Exception as e:
+        logger.error("Failed to load model: {}", e)
+        raise
+
+    # Start cleanup worker
     stop_event = asyncio.Event()
-    task = asyncio.create_task(output_cleanup_worker(
-        stop_event,
-        OUTPUT_DIRECTORY, 
-        OUTPUT_CLEANUP_MAX_AGE_MINUTES,
-        OUTPUT_CLEANUP_INTERVAL_SECONDS
-        ))
+    cleanup_task = asyncio.create_task(
+        output_cleanup_worker(
+            stop_event=stop_event,
+            output_dir=OUTPUT_DIRECTORY,
+            max_age_seconds=OUTPUT_CLEANUP_MAX_AGE_SECONDS,
+            interval_seconds=OUTPUT_CLEANUP_INTERVAL_SECONDS,
+            glob_pattern=OUTPUT_CLEANUP_GLOB,
+        )
+    )
+
     try:
         yield
     finally:
         logger.info("Lifespan SHUTDOWN enter")
-        stop_event.set()
 
+        stop_event.set()
         try:
-            await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(cleanup_task, timeout=5)
         except asyncio.TimeoutError:
-            logger.warning("Cleanup worker didn't stop in time; cancelling")
-            task.cancel()
+            cleanup_task.cancel()
             try:
-                await task
+                await cleanup_task
             except asyncio.CancelledError:
                 pass
-        except Exception:
-            logger.exception("Cleanup worker crashed during shutdown")
+        except Exception as e:
+            logger.warning("Cleanup worker ended with error: {}", e)
 
-        deleted = cleanup_output_directory(OUTPUT_DIRECTORY, 0) # On shutdown the output folder should be cleaned
-        logger.info(f"Shutdown cleanup pass deleted {deleted} file(s).")
+        # Final cleanup pass (always log)
+        deleted = cleanup_output_directory(
+            output_dir=OUTPUT_DIRECTORY,
+            max_age_seconds=OUTPUT_CLEANUP_MAX_AGE_SECONDS,
+            glob_pattern=OUTPUT_CLEANUP_GLOB,
+        )
+        logger.info("Shutdown cleanup pass deleted {} file(s).", deleted)
 
         logger.info("Lifespan SHUTDOWN exit")
 
-# =============================================================================
-# FASTAPI APPLICATION SETUP
-# =============================================================================
 
-app = FastAPI(title="SkyrimNet TTS API", description="Simplified TTS API service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="SkyrimNet TTS API",
+    description="Simplified TTS API service",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
-# Request logging middleware (logs ALL requests, even undefined endpoints)
-#@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    
-    # Log the incoming request
-    logger.info(f"📥 INCOMING REQUEST: {request.method} {request.url}")
-    logger.info(f"   Headers: {dict(request.headers)}")
-    logger.info(f"   Client: {request.client.host if request.client else 'unknown'}")
-    
-    # Log query parameters if any
-    if request.query_params:
-        logger.info(f"   Query params: {dict(request.query_params)}")
-    
-    # Try to log request body for POST requests (be careful with large files)
-    if request.method in ["POST", "PUT", "PATCH"]:
-        try:
-            content_type = request.headers.get("content-type", "")
-            if "application/json" in content_type:
-                # For JSON requests, we can log the body
-                body = await request.body()
-                if len(body) < 2000:  # Only log small bodies
-                    logger.info(f"   Body: {body.decode('utf-8')}")
-                else:
-                    logger.info(f"   Body: <large body {len(body)} bytes>")
-            elif "multipart/form-data" in content_type:
-                logger.info(f"   Body: <multipart form data>")
-            else:
-                logger.info(f"   Body: <{content_type}>")
-        except Exception as e:
-            logger.warning(f"   Body: <failed to read body: {e}>")
-    
-    # Process the request
-    try:
-        response = await call_next(request)
-        process_time = time.time() - start_time
-        
-        # Log the response
-        logger.info(f"📤 RESPONSE: {response.status_code} for {request.method} {request.url.path}")
-        logger.info(f"   Processing time: {process_time:.4f}s")
-        
-        return response
-        
-    except Exception as e:
-        process_time = time.time() - start_time
-        logger.error(f"❌ REQUEST FAILED: {request.method} {request.url.path}")
-        logger.error(f"   Error: {str(e)}")
-        logger.error(f"   Processing time: {process_time:.4f}s")
-        raise
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -357,255 +354,188 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =============================================================================
-# API ENDPOINTS
-# =============================================================================
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        elapsed = time.perf_counter() - start
+        logger.info("{} {} -> {:.4f}s", request.method, request.url.path, elapsed)
 
 
-##@app.post("/tts_to_audio")
+# =============================================================================
+# ENDPOINTS
+# =============================================================================
+
 @app.post("/tts_to_audio/")
 async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTasks):
     """
     Generate TTS audio from text with specified speaker voice.
-    
-    Parameter priority (highest to lowest):
-    1. Payload with override=True: payload values override everything
-    2. Config file "api" mode: uses payload values when config says "api"
-    3. Config file numeric values: uses config file values
-    4. DEFAULT_TTS_PARAMS: default fallback values
     """
     global IGNORE_PING
+
+    if CURRENT_MODEL is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    # Ping shortcut
+    if text == "ping":
+        if IGNORE_PING is None:
+            IGNORE_PING = "pending"
+        else:
+            logger.info("Ping request received, sending silence audio.")
+            return FileResponse(path=SILENCE_AUDIO_PATH, filename=SILENCE_AUDIO_PATH.name, media_type="audio/wav")
+
+    # Validate language (even if pocket_tts ignores it today, keep consistent API behavior)
     try:
-        wav_path = None
-        start_time = time.perf_counter()
-        logger.info(f"Post tts_to_audio - Processing TTS to audio with request: "
-                   f"text='{request.text}' speaker_wav='{request.speaker_wav}' "
-                   f"language='{request.language}' accent={request.accent} save_path='{request.save_path}' "
-                   f"override={request.override}")
-        
-        if not CURRENT_MODEL:
-            raise HTTPException(status_code=500, detail="Model not loaded")
+        _ = validate_language(request.language or "en")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        if not request.text:
-            raise HTTPException(status_code=400, detail="Text is required")
+    speaker_wav = (request.speaker_wav or "malecommoner").strip()
 
-        if request.text == "ping":
-            if IGNORE_PING is None:
-                IGNORE_PING = "pending"
-            else:
-                logger.info("Ping request received, sending silence audio.")            
-                return FileResponse(
-                    path=SILENCE_AUDIO_PATH,
-                    filename=request.save_path,
-                    media_type="audio/wav"
-                )
-        try:
-            language = validate_language(request.language or "en")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        
-        # Generate Audio
-        speaker_wav = request.speaker_wav or "malecommoner"
-        voice_state = CURRENT_MODEL.get_state_for_audio_prompt(SPEAKERS_AVAILABLE[speaker_wav])
-        audio = CURRENT_MODEL.generate_audio(voice_state, request.text)
-        
-        process_time = time.perf_counter()
-        logger.info(f"   Processing time: {(process_time - start_time):.4f}s to generate {audio.shape[-1] / CURRENT_MODEL.sample_rate:.4f} seconds")
-        
-        #TODO, I'm not sure where skyrimnet expects the output to be or how it cleans up old files
-        wav_path = OUTPUT_DIRECTORY / f"{datetime.now().strftime("%Y%m%d_%H%M%S")}_{speaker_wav.replace("\\", "_")}.wav"  
-        scipy.io.wavfile.write(wav_path, CURRENT_MODEL.sample_rate, audio.numpy())
+    # Ensure speaker exists; refresh cache if needed
+    if speaker_wav not in SPEAKERS_AVAILABLE:
+        update_available_speakers()
+    if speaker_wav not in SPEAKERS_AVAILABLE:
+        raise HTTPException(status_code=400, detail=f"Unknown speaker_wav: {speaker_wav}")
 
-        if IGNORE_PING == "pending":
-            IGNORE_PING = True
-            Path(wav_path).unlink(missing_ok=True)
-            wav_path = SILENCE_AUDIO_PATH
+    start_time = time.perf_counter()
+    logger.info(
+        "POST /tts_to_audio text_len={} speaker_wav='{}' language='{}'",
+        len(text),
+        speaker_wav,
+        request.language or "en",
+    )
 
-        return FileResponse(
-            path=wav_path,
-            filename=wav_path.name,
-            media_type="audio/wav"
-        )  
-              
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"POST /tts_to_audio - Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    # Generate audio (CPU-heavy) off the event loop
+    voice_state_start_time = time.perf_counter()
+    voice_state = CURRENT_MODEL.get_state_for_audio_prompt(SPEAKERS_AVAILABLE[speaker_wav])
+    voice_state_gen_time = time.perf_counter() - voice_state_start_time
+    logger.info("Generated voice state in {:.3f}s", voice_state_gen_time)
 
-##@app.post("/create_and_store_latents")
+    audio = await asyncio.to_thread(CURRENT_MODEL.generate_audio, voice_state, text)
+
+    gen_time = time.perf_counter() - start_time
+    dur_s = float(audio.shape[-1]) / float(CURRENT_MODEL.sample_rate)
+    logger.info("Generated {:.3f}s audio in {:.3f}s", dur_s, gen_time)
+
+    # Write output (also off event loop)
+    wav_name = _safe_output_filename(speaker_wav)
+    wav_path = OUTPUT_DIRECTORY / wav_name
+    await asyncio.to_thread(scipy.io.wavfile.write, str(wav_path), CURRENT_MODEL.sample_rate, audio.numpy())
+
+    # Handle "ignore ping" flow safely
+    if IGNORE_PING == "pending":
+        IGNORE_PING = True
+        wav_path.unlink(missing_ok=True)
+        wav_path = SILENCE_AUDIO_PATH
+        wav_name = wav_path.name
+
+    return FileResponse(path=wav_path, filename=wav_name, media_type="audio/wav")
+
 @app.post("/create_and_store_latents")
 async def create_and_store_latents(
     speaker_name: str = Form(...),
     language: str = Form("en"),
-    wav_file: UploadFile = File(...)
+    wav_file: UploadFile = File(...),
 ):
     """
-    Create and store latent embeddings from uploaded audio file
-    """    
+    Store an uploaded WAV as a speaker prompt (speaker_name.wav).
+    (This endpoint returns the expected JSON shape but does not compute latents.)
+    """
+    if CURRENT_MODEL is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+
+    speaker_name = _sanitize_speaker_name(speaker_name)
+
     try:
-        logger.info(f"POST /create_and_store_latents - Creating and storing latents for speaker: {speaker_name}, language: {language}, file: {wav_file.filename}")
-        
-        if not CURRENT_MODEL:
-            raise HTTPException(status_code=500, detail="Model not loaded")
-        
-        # Validate language
-        try:
-            language = validate_language(language)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        _ = validate_language(language)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        # Validate file type
-        if not wav_file.filename.endswith('.wav'):
-            raise HTTPException(status_code=400, detail="Only WAV files are supported")
+    if not (wav_file.filename or "").lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="Only WAV files are supported")
 
-        # Check to see if the speaker already exists, if not, we'll add it in
-        audio_path = SPEAKER_DIRECTORY.joinpath(f"{speaker_name}.wav")
-        if speaker_name not in SPEAKERS_AVAILABLE:
+    dest = SPEAKER_DIRECTORY / f"{speaker_name}.wav"
 
-            with open(audio_path, "wb") as buffer:
-                content = await wav_file.read()
-                buffer.write(content)            
-        
-            update_available_speakers()
-            logger.info(f"Successfully stored wav for speaker: {speaker_name}")
+    if speaker_name in SPEAKERS_AVAILABLE and dest.exists():
+        logger.info("Speaker '{}' already exists; not overwriting.", speaker_name)
+    else:
+        # Stream copy to disk to avoid holding full audio in memory
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as wav with open:
+            shutil.copyfileobj(wav_file.file, wav)
+            voice_state = CURRENT_MODEL.get_state_for_audio_prompt(wav_file.file)
 
-        else: # We do this to not continuously mutate the speaker overtime
-            logger.info(f"Speaker already has a stored wav: {speaker_name}")
+        update_available_speakers()
+        logger.info("Stored speaker wav: {}", str(dest))
 
-        return {
-            "message": f"Successfully stored '{speaker_name}' in language '{language}'",
-            "speaker_name": speaker_name,
-            "language": language,
-            "latent_shapes": {
-                "gpt_cond_latent": [],
-                "speaker_embedding": []
-            }
-        }
-                
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"POST /create_and_store_latents - Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    return {
+        "message": f"Successfully stored '{speaker_name}' in language '{language}'",
+        "speaker_name": speaker_name,
+        "language": language,
+        "latent_shapes": {
+            "gpt_cond_latent": [],
+            "speaker_embedding": [],
+        },
+    }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "model_loaded": CURRENT_MODEL is not None,
-        "supported_languages": SUPPORTED_LANGUAGE_CODES
+        "supported_languages": SUPPORTED_LANGUAGE_CODES,
+        "cleanup": {
+            "max_age_seconds": OUTPUT_CLEANUP_MAX_AGE_SECONDS,
+            "interval_seconds": OUTPUT_CLEANUP_INTERVAL_SECONDS,
+            "glob": OUTPUT_CLEANUP_GLOB,
+        },
     }
 
 
-# =============================================================================
-# CATCH-ALL ROUTE CONFIGURATION
-# =============================================================================
-
 def setup_catch_all_route():
-    """
-    Set up catch-all route for undefined API endpoints.
-    This should only be called when NOT mounting Gradio UI.
-    """
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
     async def catch_undefined_endpoints(request: Request, path: str):
-        """
-        Catch-all route to log attempts to access undefined endpoints
-        This helps with debugging missing routes and API discovery
-        """
-        logger.warning(f"🚫 UNDEFINED ENDPOINT: {request.method} /{path}")
-        logger.warning(f"   Full URL: {request.url}")
-        logger.warning(f"   Available endpoints:")
-        logger.warning(f"     POST /tts_to_audio")
-        logger.warning(f"     POST /create_and_store_latents") 
-        logger.warning(f"     GET  /health")
-        logger.warning(f"     GET  /docs (Swagger UI)")
-        logger.warning(f"     GET  /redoc (ReDoc)")
-        
+        logger.warning("UNDEFINED ENDPOINT: {} /{}", request.method, path)
         raise HTTPException(
-            status_code=404, 
+            status_code=404,
             detail={
                 "error": f"Endpoint not found: {request.method} /{path}",
-                "available_endpoints": [
-                    "POST /tts_to_audio",
-                    "GET /health",
-                    "GET /docs",
-                    "GET /redoc"
-                ]
-            }
-        )
-
-
-def setup_api_only_catch_all_route():
-    """
-    Set up a limited catch-all route that only catches API paths when Gradio is mounted.
-    This avoids conflicts with Gradio's routing while still providing API endpoint discovery.
-    """
-    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-    async def catch_undefined_api_endpoints(request: Request, path: str):
-        """
-        Catch-all route for undefined /api/* endpoints only
-        This helps with API debugging without interfering with Gradio
-        """
-        logger.warning(f"🚫 UNDEFINED API ENDPOINT: {request.method} /api/{path}")
-        logger.warning(f"   Full URL: {request.url}")
-        logger.warning(f"   Available API endpoints:")
-        logger.warning(f"     POST /tts_to_audio")
-        logger.warning(f"     GET  /health")
-        logger.warning(f"     GET  /docs (Swagger UI)")
-        logger.warning(f"     GET  /redoc (ReDoc)")
-        
-        raise HTTPException(
-            status_code=404, 
-            detail={
-                "error": f"API endpoint not found: {request.method} /api/{path}",
                 "available_endpoints": [
                     "POST /tts_to_audio",
                     "POST /create_and_store_latents",
                     "GET /health",
                     "GET /docs",
-                    "GET /redoc"
+                    "GET /redoc",
                 ],
-                "note": "For the Gradio UI, visit the root path '/'"
-            }
+            },
         )
-    
+
+
 # =============================================================================
-# MAIN EXECUTION
+# MAIN
 # =============================================================================
 
 if __name__ == "__main__":
-    # Pin server process to P-cores so /tts_to_audio runs on performance cores
-    pin_process_to_p_cores(logger)
-
-    # Initialize application environment
     initialize_application_environment("SkyrimNet TTS API")
-    
-    # Set up full catch-all route for standalone API mode
     setup_catch_all_route()
-    
-    # Get list of available speakers
-    update_available_speakers()
 
-    # Load model with standardized initialization
-    try:
-        CURRENT_MODEL = TTSModel.load_model("skyrimnet")
-        logger.info("Model loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        sys.exit(1)
-    
-    # Start server
-    logger.info(f"Starting server on {args.server}:{args.port}")
+    logger.info("Starting server on {}:{}", args.server, args.port)
     uvicorn.run(
-        app, 
-        host=args.server, 
-        port=args.port, 
+        app,
+        host=args.server,
+        port=args.port,
         log_level="info",
-        access_log=False,  # Disable uvicorn's access logging to use our format
-        log_config=None,    # Use default Python logging instead of uvicorn's custom format
+        access_log=False,
+        log_config=None,
         lifespan="on",
-        reload=False
     )
