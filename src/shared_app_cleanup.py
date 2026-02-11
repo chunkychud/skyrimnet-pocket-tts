@@ -31,7 +31,7 @@ def cleanup_output_directory(
     Delete files in output_dir older than max_age_seconds.
     Returns number of deleted files.
     """
-    if max_age_seconds <= 0:
+    if max_age_seconds < 0:
         return 0
 
     output_dir.mkdir(parents=True, exist_ok=True)
