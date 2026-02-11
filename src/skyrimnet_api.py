@@ -68,7 +68,7 @@ CACHED_TEMP_DIR = None
 AVAILABLE_SPEAKERS = {}
 SILENCE_AUDIO_PATH =  SPEAKER_DIRECTORY / "silence_100ms.wav"
 OUTPUT_CLEANUP_MAX_AGE_MINUTES = 5
-OUTPUT_CLEANUP_INTERVAL_SECONDS = 20 #15 * 60  # low overhead
+OUTPUT_CLEANUP_INTERVAL_SECONDS = 5 * 60  # To check the output dir every 5 minutes for cleanup
 
 # =============================================================================
 # COMMAND LINE ARGUMENT PARSING
