@@ -134,16 +134,16 @@ def get_cached_temp_dir():
     return CACHED_TEMP_DIR
 
 
-def update_available_speakers():
-    global SPEAKERS_AVAILABLE
-    SPEAKERS_AVAILABLE = {}
+# def update_available_speakers():
+#     global SPEAKERS_AVAILABLE
+#     SPEAKERS_AVAILABLE = {}
 
-    for p in SPEAKER_DIRECTORY.glob("**/*.wav"):  # recursive
-        if p.is_file():
-            speaker_name = p.name.replace(".wav", "") # Speaker name is the filename minus the extension
-            SPEAKERS_AVAILABLE[speaker_name] = p
+#     for p in SPEAKER_DIRECTORY.glob("**/*.wav"):  # recursive
+#         if p.is_file():
+#             speaker_name = p.name.replace(".wav", "") # Speaker name is the filename minus the extension
+#             SPEAKERS_AVAILABLE[speaker_name] = p
     
-    logger.info(f"Speaker currently available: {[speaker_name for speaker_name in SPEAKERS_AVAILABLE.keys()]}")
+#     logger.info(f"Speaker currently available: {[speaker_name for speaker_name in SPEAKERS_AVAILABLE.keys()]}")
 
 
 def _detect_p_core_logical_cpus_windows() -> list[int]:
@@ -406,9 +406,8 @@ async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTa
         
         # Generate Audio
         speaker_wav = request.speaker_wav or "malecommoner"
-        voice_state = CURRENT_MODEL.get_state_for_audio_prompt(SPEAKERS_AVAILABLE[speaker_wav])
         t_gen0 = time.perf_counter()
-        audio = CURRENT_MODEL.generate_audio(voice_state, request.text)
+        audio = CURRENT_MODEL.generate_audio(AVAILABLE_SPEAKERS[speaker_wav], request.text)
         gen_elapsed = time.perf_counter() - t_gen0
         
         dur_s = float(audio.shape[-1]) / float(CURRENT_MODEL.sample_rate)
@@ -463,13 +462,20 @@ async def create_and_store_latents(
 
         # Check to see if the speaker already exists, if not, we'll add it in
         audio_path = SPEAKER_DIRECTORY.joinpath(f"{speaker_name}.wav")
-        if speaker_name not in SPEAKERS_AVAILABLE:
+        if speaker_name not in AVAILABLE_SPEAKERS.keys():
 
-            with open(audio_path, "wb") as buffer:
+            # Use cached temp directory and create unique filename
+            temp_dir = get_cached_temp_dir()
+            temp_audio_path = temp_dir.joinpath(wav_file.filename)
+            
+            with open(temp_audio_path, "wb") as buffer:
                 content = await wav_file.read()
-                buffer.write(content)            
-        
-            update_available_speakers()
+                buffer.write(content)             
+
+            voice_state = CURRENT_MODEL.get_state_for_audio_prompt(str(temp_audio_path))
+            AVAILABLE_SPEAKERS[speaker_name] = voice_state
+
+            # update_available_speakers()
             logger.info(f"Successfully stored wav for speaker: {speaker_name}")
 
         else: # We do this to not continuously mutate the speaker overtime
@@ -589,7 +595,7 @@ if __name__ == "__main__":
     setup_catch_all_route()
     
     # Get list of available speakers
-    update_available_speakers()
+    # update_available_speakers()
 
     # Load model with standardized initialization
     try:
