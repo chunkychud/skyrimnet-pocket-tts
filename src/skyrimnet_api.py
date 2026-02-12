@@ -134,16 +134,18 @@ def get_cached_temp_dir():
     return CACHED_TEMP_DIR
 
 
-# def update_available_speakers():
-#     global SPEAKERS_AVAILABLE
-#     SPEAKERS_AVAILABLE = {}
+def update_available_speakers():
+    global AVAILABLE_SPEAKERS
+    AVAILABLE_SPEAKERS = {}
 
-#     for p in SPEAKER_DIRECTORY.glob("**/*.wav"):  # recursive
-#         if p.is_file():
-#             speaker_name = p.name.replace(".wav", "") # Speaker name is the filename minus the extension
-#             SPEAKERS_AVAILABLE[speaker_name] = p
+    for p in SPEAKER_DIRECTORY.glob("**/*.wav"):  # recursive
+        if p.is_file():
+            speaker_name = p.name.replace(".wav", "") # Speaker name is the filename minus the extension
+            # SPEAKERS_AVAILABLE[speaker_name] = p
+            voice_state = CURRENT_MODEL.get_state_for_audio_prompt(str(p))
+            AVAILABLE_SPEAKERS[speaker_name] = voice_state
     
-#     logger.info(f"Speaker currently available: {[speaker_name for speaker_name in SPEAKERS_AVAILABLE.keys()]}")
+    logger.info(f"Speaker currently available: {[speaker_name for speaker_name in AVAILABLE_SPEAKERS.keys()]}")
 
 
 def _detect_p_core_logical_cpus_windows() -> list[int]:
@@ -376,8 +378,6 @@ async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTa
     """
     global IGNORE_PING
     try:
-        wav_path = None
-        start_time = time.perf_counter()
         logger.info(f"Post tts_to_audio - Processing TTS to audio with request: "
                    f"text='{request.text}' speaker_wav='{request.speaker_wav}' "
                    f"language='{request.language}' accent={request.accent} save_path='{request.save_path}' "
@@ -413,7 +413,6 @@ async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTa
         dur_s = float(audio.shape[-1]) / float(CURRENT_MODEL.sample_rate)
         logger.info("Generated {:.3f}s audio in {:.3f}s (rtf={:.2f}x)", dur_s, gen_elapsed, (dur_s / gen_elapsed) if gen_elapsed > 0 else 0.0)        
         
-        #TODO, I'm not sure where skyrimnet expects the output to be or how it cleans up old files
         wav_path = OUTPUT_DIRECTORY / f"{datetime.now().strftime("%Y%m%d_%H%M%S")}_{speaker_wav.replace("\\", "_")}.wav"  
         scipy.io.wavfile.write(wav_path, CURRENT_MODEL.sample_rate, audio.numpy())
 
@@ -461,7 +460,6 @@ async def create_and_store_latents(
             raise HTTPException(status_code=400, detail="Only WAV files are supported")
 
         # Check to see if the speaker already exists, if not, we'll add it in
-        audio_path = SPEAKER_DIRECTORY.joinpath(f"{speaker_name}.wav")
         if speaker_name not in AVAILABLE_SPEAKERS.keys():
 
             # Use cached temp directory and create unique filename
@@ -475,7 +473,6 @@ async def create_and_store_latents(
             voice_state = CURRENT_MODEL.get_state_for_audio_prompt(str(temp_audio_path))
             AVAILABLE_SPEAKERS[speaker_name] = voice_state
 
-            # update_available_speakers()
             logger.info(f"Successfully stored wav for speaker: {speaker_name}")
 
         else: # We do this to not continuously mutate the speaker overtime
@@ -593,9 +590,6 @@ if __name__ == "__main__":
     
     # Set up full catch-all route for standalone API mode
     setup_catch_all_route()
-    
-    # Get list of available speakers
-    # update_available_speakers()
 
     # Load model with standardized initialization
     try:
@@ -604,7 +598,10 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         sys.exit(1)
-    
+
+    # Generate voice_state based on wav files in speakers/
+    update_available_speakers()
+
     # Start server
     logger.info(f"Starting server on {args.server}:{args.port}")
     uvicorn.run(
