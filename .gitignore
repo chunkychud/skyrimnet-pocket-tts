@@ -1,2 +1,5 @@
 # Ignore all safetensors files anywhere under weights/
 weights/**/*.safetensors
+output/**/*
+latents/**/*
+speakers/**/*

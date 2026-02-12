@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 REM ============================================================
-REM runserver.bat - Starts the SkyrimNet TTS API server
+REM runserver.bat - Starts the SkyrimNet Pocket-TTS API server
 REM - Verifies .venv exists
 REM - Activates venv
 REM - Optionally sets env vars (uncomment as needed)

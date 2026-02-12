@@ -10,4 +10,6 @@ run runserver.bat to start the server
 
 
 # Server features
-Pocket-tts runs only on the CPU, so no need to worry about GPU versions or VRAM budgets. It also has 0 shot voice cloning despite taking very little RAM. 
+Pocket-tts runs only on the CPU, so no need to worry about GPU versions or VRAM budgets. It also has 0 shot voice cloning despite taking very little RAM.
+
+If you want to speed up first time generation of voices, you can place the voice file in the speakers/ directory. It needs to be named {speaker_name}.wav where speaker_name is the voice_name you want. See examples already in there.

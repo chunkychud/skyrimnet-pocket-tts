@@ -34,24 +34,24 @@ def test_tts_to_audio():
 def test_create_and_store_latents():
 
     data = {
-        "speaker_name": "malecommoner",
+        "speaker_name": "malebrute",
         "language": "en",
     }
 
     ROOT_DIR = Path(__file__).resolve().parents[1]
-    SPEAKER_DIRECTORY = ROOT_DIR / "test_speakers"
-    SAMPLE_SPEAKER = SPEAKER_DIRECTORY / "malecommoner.wav"
+    SPEAKER_DIRECTORY = ROOT_DIR / "speakers"
+    SAMPLE_SPEAKER = SPEAKER_DIRECTORY / "malebrute.wav"
 
     with open(SAMPLE_SPEAKER, "rb") as fp:
         file = {
             "wav_file": (str(SAMPLE_SPEAKER), fp, "audio/wav"),
         }
 
-        resp = requests.post("http://127.0.0.1:7860/create_and_store_latents/", data=data, files=file)
+        resp = requests.post("http://127.0.0.1:7860/create_and_store_latents", data=data, files=file)
         resp.raise_for_status()
 
     print(resp.status_code)
     print(resp.text)
 
-# test_create_and_store_latents()
-test_tts_to_audio()
+test_create_and_store_latents()
+# test_tts_to_audio()
