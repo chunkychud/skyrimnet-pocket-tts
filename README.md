@@ -7,6 +7,8 @@
 
 # Running the server
 run runserver.bat to start the server
+Get the ip and port from the output logs
+In the SkyrimNet UI, select XTTS as your TTS service and put your ip and port there as you would for XTTS.
 
 
 # Server features
