@@ -101,31 +101,16 @@ if not exist "%DST_DIR%" (
 )
 
 echo.
-echo [INFO] Copying weights\* -> "%DST_DIR%"
+echo [INFO] Copying weights\skyrimnet.yaml -> "%DST_DIR%"
 where robocopy >nul 2>nul
 if %errorlevel%==0 (
-  robocopy "%~dp0weights" "%DST_DIR%" *.* /E /NFL /NDL /NJH /NJS /NC /NS
+  robocopy "%~dp0weights" "%DST_DIR%" skyrimnet.yaml /NFL /NDL /NJH /NJS /NC /NS
   REM Robocopy success codes are 0-7; failure is 8+
   if %errorlevel% GEQ 8 call :die robocopy failed with exit code %errorlevel%.
 ) else (
-  xcopy "%~dp0weights\*" "%DST_DIR%\" /E /I /Y >nul
+  xcopy "%~dp0weights\skyrimnet.yaml" "%DST_DIR%\" /Y >nul
   if errorlevel 1 call :die xcopy failed copying weights to pocket_tts config.
 )
-
-REM Define the YAML file path
-set "WEIGHTS_PATH=.venv\Lib\site-packages\pocket_tts\config\tts_skyrimnet.safetensors"
-set "YAML_FILE=%DST_DIR%\skyrimnet.yaml"
-
-REM Check if the YAML file exists
-if not exist "%YAML_FILE%" (
-  echo Error: YAML file not found at %YAML_FILE%
-  exit /b 1
-)
-
-REM Update the YAML file with the new weights_path
-powershell -Command "(Get-Content '%YAML_FILE%') -replace 'weights_path:.*', 'weights_path: %WEIGHTS_PATH%' | Set-Content '%YAML_FILE%'"
-
-echo Updated weights_path in %YAML_FILE% to %WEIGHTS_PATH%
 
 echo.
 echo [OK] Setup complete.

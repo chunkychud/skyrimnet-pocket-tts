@@ -103,27 +103,12 @@ main() {
   fi
 
   echo
-  echo "[INFO] Copying weights/* -> $DST_DIR"
+  echo "[INFO] Copying weights/skyrimnet.yaml -> $DST_DIR"
   if command -v rsync &>/dev/null; then
-    rsync -a "$SCRIPT_DIR/weights/" "$DST_DIR/" || die "rsync failed copying weights to pocket_tts config"
+    rsync -a "$SCRIPT_DIR/weights/skyrimnet.yaml" "$DST_DIR/" || die "rsync failed copying skyrimnet.yaml to pocket_tts config"
   else
-    cp -r "$SCRIPT_DIR/weights/"* "$DST_DIR/" || die "cp failed copying weights to pocket_tts config"
+    cp -r "$SCRIPT_DIR/weights/skyrimnet.yaml" "$DST_DIR/" || die "cp failed copying weights to pocket_tts config"
   fi
-
-  # Define the YAML file path
-  YAML_FILE="$DST_DIR/skyrimnet.yaml"
-  WEIGHTS_PATH=".venv/lib/python3.13/site-packages/pocket_tts/config/tts_skyrimnet.safetensors"
-
-  # Check if the YAML file exists
-  if [ ! -f "$YAML_FILE" ]; then
-    echo "Error: YAML file not found at $YAML_FILE"
-    exit 1
-  fi
-
-  # Update the YAML file with the new weights_path
-  sed -i "s|weights_path:.*|weights_path: $WEIGHTS_PATH|" "$YAML_FILE"
-
-  echo "Updated weights_path in $YAML_FILE to $WEIGHTS_PATH"
   
   echo
   echo "[OK] Setup complete."
