@@ -6,7 +6,7 @@ REM setup.bat - Windows setup script for the server
 REM 1) Verify Python 3.10-3.14 is installed and works
 REM 2) Verify weights\tts_skyrimnet.safetensors exists
 REM 3) Create .venv and pip install requirements
-REM 4) Copy weights\* into .venv\Lib\site-packages\pocket_tts\config\
+REM 4) Copy weights\skyrimnet.yaml into .venv\Lib\site-packages\pocket_tts\config\
 REM
 REM On any error, the window will NOT close (it will pause).
 REM ============================================================
@@ -101,14 +101,14 @@ if not exist "%DST_DIR%" (
 )
 
 echo.
-echo [INFO] Copying weights\* -> "%DST_DIR%"
+echo [INFO] Copying weights\skyrimnet.yaml -> "%DST_DIR%"
 where robocopy >nul 2>nul
 if %errorlevel%==0 (
-  robocopy "%~dp0weights" "%DST_DIR%" *.* /E /NFL /NDL /NJH /NJS /NC /NS
+  robocopy "%~dp0weights" "%DST_DIR%" skyrimnet.yaml /NFL /NDL /NJH /NJS /NC /NS
   REM Robocopy success codes are 0-7; failure is 8+
   if %errorlevel% GEQ 8 call :die robocopy failed with exit code %errorlevel%.
 ) else (
-  xcopy "%~dp0weights\*" "%DST_DIR%\" /E /I /Y >nul
+  xcopy "%~dp0weights\skyrimnet.yaml" "%DST_DIR%\" /Y >nul
   if errorlevel 1 call :die xcopy failed copying weights to pocket_tts config.
 )
 

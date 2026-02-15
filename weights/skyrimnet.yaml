@@ -1,6 +1,6 @@
 # sig: b6369a24
 
-weights_path: .venv/Lib/site-packages/pocket_tts/config/tts_skyrimnet.safetensors
+weights_path: weights/tts_skyrimnet.safetensors
 weights_path_without_voice_cloning: hf://kyutai/pocket-tts-without-voice-cloning/tts_b6369a24.safetensors@d4fdd22ae8c8e1cb3634e150ebeff1dab2d16df3
 
 flow_lm:
@@ -19,7 +19,6 @@ flow_lm:
     n_bins: 4000
     tokenizer: sentencepiece
     tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/tokenizer.model@d4fdd22ae8c8e1cb3634e150ebeff1dab2d16df3
-  #weights_path: flow_lm_b6369a24.safetensors
 
 mimi:
   dtype: float32
@@ -54,4 +53,3 @@ mimi:
   quantizer:
     dimension: 32
     output_dimension: 512
-  #weights_path: mimi_b6369a24.safetensors
