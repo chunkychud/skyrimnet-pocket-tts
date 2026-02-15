@@ -112,6 +112,21 @@ if %errorlevel%==0 (
   if errorlevel 1 call :die xcopy failed copying weights to pocket_tts config.
 )
 
+REM Define the YAML file path
+set "WEIGHTS_PATH=.venv\Lib\site-packages\pocket_tts\config\tts_skyrimnet.safetensors"
+set "YAML_FILE=%DST_DIR%\skyrimnet.yaml"
+
+REM Check if the YAML file exists
+if not exist "%YAML_FILE%" (
+  echo Error: YAML file not found at %YAML_FILE%
+  exit /b 1
+)
+
+REM Update the YAML file with the new weights_path
+powershell -Command "(Get-Content '%YAML_FILE%') -replace 'weights_path:.*', 'weights_path: %WEIGHTS_PATH%' | Set-Content '%YAML_FILE%'"
+
+echo Updated weights_path in %YAML_FILE% to %WEIGHTS_PATH%
+
 echo.
 echo [OK] Setup complete.
 echo     Next: use run_server.bat to start the API.
