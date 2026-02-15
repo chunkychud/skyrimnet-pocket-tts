@@ -6,7 +6,7 @@ REM setup.bat - Windows setup script for the server
 REM 1) Verify Python 3.10-3.14 is installed and works
 REM 2) Verify weights\tts_skyrimnet.safetensors exists
 REM 3) Create .venv and pip install requirements
-REM 4) Copy weights\* into .venv\Lib\site-packages\pocket_tts\config\
+REM 4) Copy weights\skyrimnet.yaml into .venv\Lib\site-packages\pocket_tts\config\
 REM
 REM On any error, the window will NOT close (it will pause).
 REM ============================================================

@@ -4,7 +4,7 @@
 # 1) Verify Python 3.10-3.14 is installed and works
 # 2) Verify weights/tts_skyrimnet.safetensors exists
 # 3) Create .venv and pip install requirements
-# 4) Copy weights/* into .venv/lib/pythonX.Y/site-packages/pocket_tts/config/
+# 4) Copy weights/skyrimnet.yaml into .venv/lib/pythonX.Y/site-packages/pocket_tts/config/
 #
 # On any error, the script will exit with a non-zero status.
 # ============================================================
